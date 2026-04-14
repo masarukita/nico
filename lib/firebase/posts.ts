@@ -1,41 +1,35 @@
 // lib/firebase/posts.ts
-
-// Firestore操作に必要な関数を import
 import {
-  addDoc,
   collection,
+  addDoc,
+  serverTimestamp,
   getDocs,
+  limit,
   orderBy,
   query,
-  serverTimestamp,
-  type DocumentData,
-  type QueryDocumentSnapshot,
+  startAfter,
+  QueryDocumentSnapshot,
+  DocumentData,
 } from "firebase/firestore";
 
-// Firestore(DB)インスタンス取得関数（あなたがStep2で作成したやつ）
 import { getDb } from "@/lib/firebase/firestore";
-
-// Post型（あなたがStep3で作った型定義）
 import type { Post } from "@/types/post";
 
-/**
- * Firestoreのコレクション名は固定
- * - ここを変えると全コードに影響するので定数化して事故防止
- */
-const POSTS_COLLECTION = "posts";
+export const POSTS_PAGE_SIZE_DEFAULT = 20;
 
-/**
- * FirestoreのDocumentを Post型に変換する関数
- * - Firestoreは型がゆるいのでここで統一しておくと後がラク
- */
-function convertPostDoc(docSnap: QueryDocumentSnapshot<DocumentData>): Post {
-  const data = docSnap.data();
+export type FetchPostsPageResult = {
+  posts: Post[];
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+};
+
+function toPost(docSnap: QueryDocumentSnapshot<DocumentData>): Post {
+  const data = docSnap.data() as any;
 
   return {
     id: docSnap.id,
     content: String(data.content ?? ""),
     userId: String(data.userId ?? ""),
-    createdAt: data.createdAt ?? null, // serverTimestamp直後はnullになることがある
+    createdAt: data.createdAt ?? null,
     reactionCounts: {
       wakaru: Number(data.reactionCounts?.wakaru ?? 0),
       sugoi: Number(data.reactionCounts?.sugoi ?? 0),
@@ -46,44 +40,52 @@ function convertPostDoc(docSnap: QueryDocumentSnapshot<DocumentData>): Post {
 }
 
 /**
- * ✅ 投稿を作成してFirestoreに保存する
- * - userId は匿名ID（Step1の anonUserId）
- * - createdAt は serverTimestamp（サーバー時刻）で保存
+ * 投稿を新しい順にページ単位で取得（無限スクロール用）
  */
-export async function createPost(params: { content: string; userId: string }) {
+export async function fetchPostsPage(
+  pageSize: number = POSTS_PAGE_SIZE_DEFAULT,
+  cursor: QueryDocumentSnapshot<DocumentData> | null = null
+): Promise<FetchPostsPageResult> {
   const db = getDb();
+  const postsRef = collection(db, "posts");
 
-  // postsコレクション参照を作る
-  const colRef = collection(db, POSTS_COLLECTION);
+  const q = cursor
+    ? query(postsRef, orderBy("createdAt", "desc"), startAfter(cursor), limit(pageSize))
+    : query(postsRef, orderBy("createdAt", "desc"), limit(pageSize));
 
-  // Firestoreに追加（addDoc）
-  await addDoc(colRef, {
-    content: params.content, // 投稿本文
-    userId: params.userId,   // 匿名ID
+  const snap = await getDocs(q);
+
+  const posts = snap.docs.map(toPost);
+  const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+
+  return { posts, lastDoc };
+}
+
+/**
+ * 新規投稿を作成
+ * - createdAt: serverTimestamp() でサーバー時刻を入れる
+ * - reactionCounts/commentCount は初期値を入れる
+ */
+export async function createPost(params: {
+  content: string;
+  userId: string;
+}): Promise<string> {
+  const db = getDb();
+  const postsRef = collection(db, "posts");
+
+  const content = params.content.trim();
+  const userId = params.userId.trim();
+
+  if (!content) throw new Error("content is empty");
+  if (!userId) throw new Error("userId is empty");
+
+  const docRef = await addDoc(postsRef, {
+    content,
+    userId,
     createdAt: serverTimestamp(),
     reactionCounts: { wakaru: 0, sugoi: 0, erai: 0 },
     commentCount: 0,
   });
+
+  return docRef.id;
 }
-
-/**
- * ✅ 投稿一覧を取得（新しい順）
- * - MVPなのでとりあえず全件取得
- * - createdAt desc で並べる
- */
-export async function fetchPosts(): Promise<Post[]> {
-  const db = getDb();
-
-  // posts を createdAt の降順で取るクエリ
-  const q = query(
-    collection(db, POSTS_COLLECTION),
-    orderBy("createdAt", "desc")
-  );
-
-  // Firestoreから取得
-  const snap = await getDocs(q);
-
-  // Post型に変換して返す
-  return snap.docs.map(convertPostDoc);
-}
-``
