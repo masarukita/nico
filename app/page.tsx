@@ -20,13 +20,14 @@ export default function Home() {
   const [hasMore, setHasMore] = useState(true);
   const lastDocRef = useRef<QueryDocumentSnapshot<DocumentData> | null>(null);
 
-  // 無限スクロールの監視対象（ページ最下部の目印）
+  // 無限スクロール監視ターゲット
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const loadFirst = useCallback(async () => {
     try {
       setError("");
       setLoadingFirst(true);
+      setLoadingMore(false);
       setHasMore(true);
       lastDocRef.current = null;
 
@@ -35,7 +36,7 @@ export default function Home() {
       setPosts(first);
       lastDocRef.current = lastDoc;
 
-      // 次ページが無い（= 取得数が pageSize 未満）なら hasMore=false
+      // 次ページが無いなら hasMore=false
       if (!lastDoc || first.length < PAGE_SIZE) setHasMore(false);
     } catch (e: any) {
       setError(`取得に失敗しました: ${e?.message || String(e)}`);
@@ -45,7 +46,6 @@ export default function Home() {
   }, []);
 
   const loadMore = useCallback(async () => {
-    // 二重読み込み防止
     if (loadingMore) return;
     if (!hasMore) return;
 
@@ -61,7 +61,14 @@ export default function Home() {
 
       const { posts: next, lastDoc } = await fetchPostsPage(PAGE_SIZE, cursor);
 
-      // 重複排除（念のため）
+      // 追加が0件なら終端
+      if (next.length === 0) {
+        setHasMore(false);
+        lastDocRef.current = null;
+        return;
+      }
+
+      // 重複排除して追記
       setPosts((prev) => {
         const seen = new Set(prev.map((p) => p.id));
         const merged = [...prev];
@@ -73,6 +80,7 @@ export default function Home() {
 
       lastDocRef.current = lastDoc;
 
+      // 次ページが無いなら hasMore=false
       if (!lastDoc || next.length < PAGE_SIZE) setHasMore(false);
     } catch (e: any) {
       setError(`追加取得に失敗しました: ${e?.message || String(e)}`);
@@ -86,32 +94,33 @@ export default function Home() {
     loadFirst();
   }, [loadFirst]);
 
-  // IntersectionObserver で最下部まで来たら loadMore
+  // IntersectionObserver で最下部に来たら loadMore
   useEffect(() => {
+    if (!hasMore) return;           // もう無いなら監視不要
+    if (loadingFirst) return;       // 初回ロード中は待つ
+
     const el = sentinelRef.current;
     if (!el) return;
 
-    // 対応してないブラウザ向けは“もっと見るボタン”でフォールバックできる
     if (!("IntersectionObserver" in window)) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry.isIntersecting) {
+        if (entry?.isIntersecting) {
           loadMore();
         }
       },
       {
         root: null,
-        // ちょっと手前で読み始める（体感が良い）
-        rootMargin: "300px 0px",
+        rootMargin: "400px 0px", // 少し手前で読み込み開始
         threshold: 0,
       }
     );
 
     observer.observe(el);
     return () => observer.disconnect();
-  }, [loadMore]);
+  }, [loadMore, hasMore, loadingFirst]);
 
   return (
     <div>
@@ -148,7 +157,7 @@ export default function Home() {
             <PostCard
               key={p.id}
               post={p}
-              // リアクション後に再取得したいなら、ここは loadFirst() でもOK
+              // リアクション後に最新表示へ戻す（簡易運用）
               onReactionChanged={loadFirst}
             />
           ))}
@@ -160,23 +169,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* これが最下部検知用 */}
+        {/* 監視用sentinel（常に下に置く） */}
         <div ref={sentinelRef} className="h-1" />
 
-        {/* フォールバック：もっと見る（Observer非対応/不安定な時） */}
-        {!loadingFirst && hasMore && !("IntersectionObserver" in window) && (
-          <div className="mt-4 text-center">
-            <button
-              onClick={loadMore}
-              className="px-4 py-2 rounded-full bg-gray-100 text-gray-700"
-            >
-              もっと見る
-            </button>
-          </div>
-        )}
-
         {/* 終端 */}
-        {!loadingFirst && !hasMore && posts.length > 0 && (
+        {!loadingFirst && !loadingMore && !hasMore && posts.length > 0 && (
           <div className="mt-6 mb-6 text-center text-gray-300 text-sm">
             これ以上ありません
           </div>

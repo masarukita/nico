@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# secrets / keys
+serviceAccountKey.json
+.env.local
+.env.*
+*.pem
+*.p12
