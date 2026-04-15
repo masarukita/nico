@@ -140,7 +140,7 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
       if (!judge.ok) {
         // GRAY（保留）の場合は特別メッセージ
         if (judge.stage === "gray") {
-          setError("このコメントはAI判定で保留になりました。運営の確認後に反映されます。");
+          setError("このコメントは保留になりました。運営の確認後に反映されます。");
         } else if (judge.blockedBy === "system") {
           setError("ただいま判定が混み合っています。少し時間をおいて再度お試しください。");
         } else {
