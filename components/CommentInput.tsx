@@ -1,85 +1,203 @@
 "use client";
 
 import { useState } from "react";
+import { collection, doc, runTransaction, serverTimestamp } from "firebase/firestore";
+
+import { getDb } from "@/lib/firebase/firestore";
+import { useAnonUserId } from "@/hooks/useAnonUserId";
+import { containsNg } from "@/utils/ngFilter";
+
+const MIN_LEN = 1;
+const MAX_LEN = 100;
+const POST_CONTEXT_MAX = 280;
+const RATE_MS = 30_000;
+
+function rateKey(postId: string) {
+  return `lastCommentTimestamp_${postId}`;
+}
 
 type Props = {
   postId: string;
-  postContent: string;
+  postContent?: string;
   onSubmitted?: () => void;
 };
 
+type JudgeResponse = {
+  ok: boolean;
+  blockedBy?: "ng_word" | "ai" | "system" | null;
+  reasonCode?: string;
+  ngMatched?: string[];
+  reason?: string; // 後方互換
+  raw?: string;    // 後方互換
+  detail?: string;
+};
+
 export default function CommentInput({ postId, postContent, onSubmitted }: Props) {
+  const db = getDb();
+  const { anonUserId } = useAnonUserId();
+
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [debug, setDebug] = useState("");
 
-  // ここはあなたの anon userId 取得に合わせてください
-  const userId =
-    typeof window !== "undefined"
-      ? localStorage.getItem("anonUserId") || ""
-      : "";
+  function validate(input: string): string | null {
+    const t = input.trim();
+    if (t.length < MIN_LEN) return "コメントを入力してください";
+    if (t.length > MAX_LEN) return `コメントは${MAX_LEN}文字以内です`;
+    if (containsNg(t)) return "このSNSでは共感・賞賛コメントのみ投稿できます";
+    return null;
+  }
 
-  const submit = async () => {
-    if (!text.trim()) return;
+  function checkRateLimit(): string | null {
+    const key = rateKey(postId);
+    const last = localStorage.getItem(key);
+    if (!last) return null;
 
-    try {
-      setError("");
-      setSending(true);
+    const diff = Date.now() - Number(last);
+    if (diff < RATE_MS) {
+      const remain = Math.ceil((RATE_MS - diff) / 1000);
+      return `コメントは30秒に1回までです（あと${remain}秒）`;
+    }
+    return null;
+  }
 
-      const res = await fetch("/api/judge-comment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          postId,
-          postContent,
-          comment: text,
-          userId,
-        }),
+  async function judgeByServer(comment: string): Promise<JudgeResponse> {
+    const trimmedPost = (postContent ?? "").trim().slice(0, POST_CONTEXT_MAX);
+
+    const res = await fetch("/api/judge-comment", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        postId,
+        postContent: trimmedPost,
+        comment,          // ★ route.ts と一致
+        userId: anonUserId,
+      }),
+    });
+
+    return (await res.json().catch(() => ({}))) as JudgeResponse;
+  }
+
+  async function saveCommentToFirestore(content: string) {
+    const postRef = doc(db, "posts", postId);
+    const commentsCol = collection(db, "comments");
+
+    await runTransaction(db, async (tx) => {
+      const postSnap = await tx.get(postRef);
+      if (!postSnap.exists()) throw new Error("投稿が存在しません");
+
+      const postData = postSnap.data() as any;
+      const curCount = Number(postData.commentCount ?? 0);
+
+      const newCommentRef = doc(commentsCol);
+
+      tx.set(newCommentRef, {
+        postId,
+        userId: anonUserId,
+        content,
+        createdAt: serverTimestamp(),
       });
 
-      const json = await res.json();
+      tx.update(postRef, { commentCount: curCount + 1 });
+    });
+  }
 
-      if (!json.ok) {
-        // UIには簡潔に（詳細はmoderation_logsに残る）
-        setError("そのコメントは投稿できませんでした。");
+  async function submit() {
+    setError("");
+    setDebug("");
+
+    if (busy) return;
+    if (!postId) return setError("投稿IDが取得できません。再読み込みしてください。");
+    if (!anonUserId) return setError("ユーザーID準備中です。少し待ってください。");
+
+    const v = validate(text);
+    if (v) return setError(v);
+
+    const r = checkRateLimit();
+    if (r) return setError(r);
+
+    try {
+      setBusy(true);
+
+      const comment = text.trim();
+
+      // ① 判定（ここで moderation_logs が prod に書かれる）
+      const judge = await judgeByServer(comment);
+
+      if (process.env.NODE_ENV !== "production") {
+        const parts: string[] = [];
+        if (judge.blockedBy) parts.push(`blockedBy=${judge.blockedBy}`);
+        if (judge.reasonCode) parts.push(`reasonCode=${judge.reasonCode}`);
+        if (judge.ngMatched?.length) parts.push(`ng=${judge.ngMatched.join(",")}`);
+        if (judge.reason) parts.push(`reason=${judge.reason}`);
+        if (judge.raw) parts.push(`raw=${judge.raw}`);
+        if (parts.length) setDebug(`debug: ${parts.join(" ")}`);
+      }
+
+      if (!judge.ok) {
+        // system の場合は“今は判定できない”の方が親切
+        if (judge.blockedBy === "system") {
+          setError("ただいま判定が混み合っています。少し時間をおいて再度お試しください。");
+        } else {
+          setError("このSNSでは共感・賞賛コメントのみ投稿できます");
+        }
         return;
       }
 
-      // OKなら、あなたの既存のcreateComment等を呼ぶ構造ならここで呼ぶ
-      // 例：await createComment({ postId, content: text, userId });
+      // ② ここが本体：Firestore保存
+      await saveCommentToFirestore(comment);
 
+      localStorage.setItem(rateKey(postId), String(Date.now()));
       setText("");
+
+      // ③ 親に再取得させる（詳細でコメントが見えるようになる）
       onSubmitted?.();
     } catch (e: any) {
-      setError("送信に失敗しました。時間をおいて再度お試しください。");
+      console.error("[CommentInput] submit failed:", e);
+      setError(`コメント送信に失敗しました: ${e?.message || String(e)}`);
     } finally {
-      setSending(false);
+      setBusy(false);
     }
-  };
+  }
 
   return (
     <div className="mt-3">
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="コメントを書く（共感・応援）"
-        className="w-full border rounded-lg p-2"
-        maxLength={200}
-      />
-      <div className="flex justify-between items-center mt-2">
-        <div className="text-xs text-gray-400">{text.length}/200</div>
+      <div className="text-xs text-gray-500 mb-2">
+        ※共感・賞賛コメントのみ投稿できます（否定・アドバイスは不可）
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          className="flex-1 border rounded-full px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6FCF97]"
+          placeholder="コメントを書く（共感・応援）"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          maxLength={MAX_LEN}
+          disabled={busy}
+        />
         <button
           onClick={submit}
-          disabled={sending}
-          className="bg-[#6FCF97] text-white px-4 py-2 rounded-full disabled:opacity-60"
+          disabled={busy}
+          className="bg-[#6FCF97] text-white px-4 rounded-full disabled:opacity-50"
         >
-          {sending ? "投稿中..." : "投稿"}
+          {busy ? "送信中..." : "投稿"}
         </button>
       </div>
 
-      {!!error && (
-        <div className="mt-2 text-sm text-red-600">{error}</div>
+      {error && (
+        <div className="mt-2 bg-red-100 text-red-700 p-2 rounded-lg text-sm">
+          {error}
+        </div>
       )}
+
+      {process.env.NODE_ENV !== "production" && debug && (
+        <div className="mt-2 text-xs text-gray-400 break-words">{debug}</div>
+      )}
+
+      <div className="mt-1 text-xs text-gray-400 text-right">
+        {text.trim().length}/{MAX_LEN}
+      </div>
     </div>
   );
 }
