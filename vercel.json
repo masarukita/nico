@@ -2,7 +2,7 @@
   "cron": [
     {
       "path": "/api/moderation/apply",
-      "schedule": "*/1 * * * *",  // 毎分実行
+      "schedule": "*/1 * * * *",
       "headers": {
         "x-admin-token": "nico-admin-19831009"
       }
