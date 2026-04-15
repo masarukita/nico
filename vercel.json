@@ -1,0 +1,11 @@
+{
+  "cron": [
+    {
+      "path": "/api/moderation/apply",
+      "schedule": "*/1 * * * *",  // 毎分実行
+      "headers": {
+        "x-admin-token": "nico-admin-19831009"
+      }
+    }
+  ]
+}
