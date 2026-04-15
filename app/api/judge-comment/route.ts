@@ -10,21 +10,26 @@ type AiJudgeResult = {
   latencyMs: number;
 };
 
-// --- ユーティリティ ---
 function excerpt(text: string, max = 80) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
   return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
+function sanitizeErrorMessage(msg: string) {
+  // 念のため鍵っぽい文字列は伏せる
+  return String(msg ?? "").replace(/sk-[A-Za-z0-9_-]+/g, "sk-***");
+}
+
 async function writeModerationLog(payload: any) {
   const db = getAdminDb();
-  await db.collection("moderation_logs").add({
+  const ref = await db.collection("moderation_logs").add({
     ...payload,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
+  return ref.id;
 }
 
-// --- AI判定（サーバー側） ---
+// --- AI判定 ---
 async function judgeByAI(post: string, comment: string): Promise<AiJudgeResult> {
   const started = Date.now();
 
@@ -32,7 +37,6 @@ async function judgeByAI(post: string, comment: string): Promise<AiJudgeResult> 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY missing");
 
-  // ※ここはあなたの既存プロンプトに合わせてOK
   const system = `You moderate replies in a support-only social app.
 Output ONLY "YES" or "NO".`;
 
@@ -65,8 +69,6 @@ Output ONLY "YES" or "NO".`;
     .toUpperCase();
 
   const raw: "YES" | "NO" = content.includes("YES") ? "YES" : "NO";
-
-  // reasonはあなたの体系に合わせてOK（例：プロンプトで理由も返すならそれを入れる）
   const reason = raw === "YES" ? "yes" : "no";
   const latencyMs = Date.now() - started;
 
@@ -75,39 +77,38 @@ Output ONLY "YES" or "NO".`;
 
 export async function POST(req: Request) {
   const started = Date.now();
+  const db = getAdminDb();
 
   let body: any = null;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ ok: false, reason: "bad_json" }, { status: 400 });
+    return NextResponse.json({ ok: false, blockedBy: "system", reasonCode: "SYS:BAD_JSON" }, { status: 400 });
   }
 
-  // ✅ CommentInput.tsx（新）に合わせた受け取り
   const postId = String(body?.postId ?? "");
   const postContent = String(body?.postContent ?? "");
   const comment = String(body?.comment ?? "");
   const userId = String(body?.userId ?? "");
 
-  // 入力チェック
   if (!postId || !comment) {
-    return NextResponse.json(
-      { ok: false, blockedBy: "system", reasonCode: "SYS:MISSING_INPUT" },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, blockedBy: "system", reasonCode: "SYS:MISSING_INPUT" }, { status: 400 });
   }
 
-  // ① NGワード層
+  // =========================
+  // BLACK（強NGワード）
+  // =========================
   const ng = checkNgWords(comment);
   if (ng) {
-    const log = {
-      env: process.env.VERCEL_ENV || "prod",
+    const logId = await writeModerationLog({
+      env: process.env.VERCEL_ENV || "production",
       postId,
       postExcerpt: excerpt(postContent),
       commentExcerpt: excerpt(comment),
       userId,
 
       accepted: false,
+      stage: "black",
       blockedBy: "ng_word",
       reasonCode: `NGWORD:${ng.category}`,
       ngMatched: ng.matched,
@@ -116,77 +117,154 @@ export async function POST(req: Request) {
       aiModel: null,
       aiReason: null,
       latencyMs: Date.now() - started,
-    };
-
-    await writeModerationLog(log);
+    });
 
     return NextResponse.json({
       ok: false,
+      stage: "black",
       blockedBy: "ng_word",
-      reasonCode: log.reasonCode,
+      reasonCode: `NGWORD:${ng.category}`,
       ngMatched: ng.matched,
+      logId,
     });
   }
 
-  // ② AI層
+  // =========================
+  // WHITE / GRAY（AI）
+  // =========================
   try {
     const ai = await judgeByAI(postContent, comment);
 
-    const accepted = ai.raw === "YES";
-    const reasonCode = accepted ? "AI:YES" : `AI:NO_${ai.reason.toUpperCase()}`;
+    // WHITE: YES → OK
+    if (ai.raw === "YES") {
+      const logId = await writeModerationLog({
+        env: process.env.VERCEL_ENV || "production",
+        postId,
+        postExcerpt: excerpt(postContent),
+        commentExcerpt: excerpt(comment),
+        userId,
 
-    const log = {
-      env: process.env.VERCEL_ENV || "prod",
-      postId,
-      postExcerpt: excerpt(postContent),
-      commentExcerpt: excerpt(comment),
-      userId,
+        accepted: true,
+        stage: "white",
+        blockedBy: null,
+        reasonCode: "AI:YES",
+        ngMatched: [],
 
-      accepted,
-      blockedBy: accepted ? null : "ai",
-      reasonCode,
-      ngMatched: [],
+        aiRaw: ai.raw,
+        aiModel: ai.model,
+        aiReason: ai.reason,
+        latencyMs: ai.latencyMs,
+      });
 
-      aiRaw: ai.raw,
-      aiModel: ai.model,
-      aiReason: ai.reason,
-      latencyMs: ai.latencyMs,
-    };
+      return NextResponse.json({
+        ok: true,
+        stage: "white",
+        blockedBy: null,
+        reasonCode: "AI:YES",
+        logId,
+      });
+    }
 
-    await writeModerationLog(log);
-
-    return NextResponse.json({
-      ok: accepted,
-      blockedBy: accepted ? null : "ai",
-      reasonCode,
-    });
-  } catch (e: any) {
-    // ③ システム層（OpenAI失敗等）
-    const log = {
-      env: process.env.VERCEL_ENV || "prod",
+    // GRAY: NO → 保留
+    const logId = await writeModerationLog({
+      env: process.env.VERCEL_ENV || "production",
       postId,
       postExcerpt: excerpt(postContent),
       commentExcerpt: excerpt(comment),
       userId,
 
       accepted: false,
+      stage: "gray",
+      blockedBy: "ai",
+      reasonCode: `AI:NO_${ai.reason.toUpperCase()}`,
+      ngMatched: [],
+
+      aiRaw: ai.raw,
+      aiModel: ai.model,
+      aiReason: ai.reason,
+      latencyMs: ai.latencyMs,
+    });
+
+    // pendingへ登録
+    const pendingRef = await db.collection("comments_pending").add({
+      postId,
+      userId,
+      content: comment,
+      postExcerpt: excerpt(postContent),
+      commentExcerpt: excerpt(comment),
+
+      aiRaw: ai.raw,
+      aiReason: ai.reason,
+      aiModel: ai.model,
+
+      status: "pending", // ★人間が allow/deny に変える
+      decidedAt: null,
+      decidedBy: null,
+      appliedAt: null,
+      appliedCommentId: null,
+
+      logId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return NextResponse.json({
+      ok: false,
+      stage: "gray",
+      blockedBy: "ai",
+      reasonCode: `AI:NO_${ai.reason.toUpperCase()}`,
+      pendingId: pendingRef.id,
+      logId,
+    });
+  } catch (e: any) {
+    // AI失敗も GRAY 扱いにして保留へ（systemエラーでも人が通せる）
+    const safeMsg = sanitizeErrorMessage(e?.message || String(e));
+    const logId = await writeModerationLog({
+      env: process.env.VERCEL_ENV || "production",
+      postId,
+      postExcerpt: excerpt(postContent),
+      commentExcerpt: excerpt(comment),
+      userId,
+
+      accepted: false,
+      stage: "gray",
       blockedBy: "system",
       reasonCode: "SYS:AI_ERROR",
       ngMatched: [],
 
       aiRaw: "ERROR",
       aiModel: process.env.OPENAI_MODEL || null,
-      aiReason: e?.message || String(e),
+      aiReason: safeMsg,
       latencyMs: Date.now() - started,
-    };
+    });
 
-    await writeModerationLog(log);
+    const pendingRef = await db.collection("comments_pending").add({
+      postId,
+      userId,
+      content: comment,
+      postExcerpt: excerpt(postContent),
+      commentExcerpt: excerpt(comment),
+
+      aiRaw: "ERROR",
+      aiReason: safeMsg,
+      aiModel: process.env.OPENAI_MODEL || null,
+
+      status: "pending",
+      decidedAt: null,
+      decidedBy: null,
+      appliedAt: null,
+      appliedCommentId: null,
+
+      logId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
     return NextResponse.json({
       ok: false,
+      stage: "gray",
       blockedBy: "system",
-      reasonCode: log.reasonCode,
-      detail: "temporarily unavailable",
+      reasonCode: "SYS:AI_ERROR",
+      pendingId: pendingRef.id,
+      logId,
     });
   }
 }

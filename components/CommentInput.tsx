@@ -24,11 +24,12 @@ type Props = {
 
 type JudgeResponse = {
   ok: boolean;
+  stage?: "white" | "black" | "gray";
   blockedBy?: "ng_word" | "ai" | "system" | null;
   reasonCode?: string;
   ngMatched?: string[];
-  reason?: string; // 後方互換
-  raw?: string;    // 後方互換
+  reason?: string;
+  raw?: string;
   detail?: string;
 };
 
@@ -71,7 +72,7 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
       body: JSON.stringify({
         postId,
         postContent: trimmedPost,
-        comment,          // ★ route.ts と一致
+        comment,
         userId: anonUserId,
       }),
     });
@@ -122,11 +123,12 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
 
       const comment = text.trim();
 
-      // ① 判定（ここで moderation_logs が prod に書かれる）
+      // ① 判定（moderation_logs + comments_pendingに書き込まれる）
       const judge = await judgeByServer(comment);
 
       if (process.env.NODE_ENV !== "production") {
         const parts: string[] = [];
+        if (judge.stage) parts.push(`stage=${judge.stage}`);
         if (judge.blockedBy) parts.push(`blockedBy=${judge.blockedBy}`);
         if (judge.reasonCode) parts.push(`reasonCode=${judge.reasonCode}`);
         if (judge.ngMatched?.length) parts.push(`ng=${judge.ngMatched.join(",")}`);
@@ -136,8 +138,10 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
       }
 
       if (!judge.ok) {
-        // system の場合は“今は判定できない”の方が親切
-        if (judge.blockedBy === "system") {
+        // GRAY（保留）の場合は特別メッセージ
+        if (judge.stage === "gray") {
+          setError("このコメントはAI判定で保留になりました。運営の確認後に反映されます。");
+        } else if (judge.blockedBy === "system") {
           setError("ただいま判定が混み合っています。少し時間をおいて再度お試しください。");
         } else {
           setError("このSNSでは共感・賞賛コメントのみ投稿できます");
@@ -145,13 +149,11 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
         return;
       }
 
-      // ② ここが本体：Firestore保存
+      // ② WHITE（OK）の場合のみ保存
       await saveCommentToFirestore(comment);
 
       localStorage.setItem(rateKey(postId), String(Date.now()));
       setText("");
-
-      // ③ 親に再取得させる（詳細でコメントが見えるようになる）
       onSubmitted?.();
     } catch (e: any) {
       console.error("[CommentInput] submit failed:", e);
