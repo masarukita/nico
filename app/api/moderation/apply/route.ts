@@ -17,7 +17,7 @@ export async function POST(req: Request) {
 
   const db = getAdminDb();
 
-  // status == "allow" の pending を少しずつ処理（最大50件）
+  // status == "allow" の pending を最大50件処理
   const snap = await db.collection("comments_pending")
     .where("status", "==", "allow")
     .limit(50)
@@ -37,7 +37,6 @@ export async function POST(req: Request) {
     const content = String(p.content ?? "");
 
     if (!postId || !content) {
-      // 不正データは deny 扱いにしてスキップ
       await docSnap.ref.update({
         status: "deny",
         decidedAt: admin.firestore.FieldValue.serverTimestamp(),
