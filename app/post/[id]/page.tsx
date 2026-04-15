@@ -1,13 +1,11 @@
 // app/post/[id]/page.tsx
-// ✅ "use client" は書かない（= Server Component）
-
 import PostDetailClient from "./PostDetailClient";
 
 type PageProps = {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 };
 
-export default function PostDetailPage({ params }: PageProps) {
-  const { id } = params;
+export default async function PostDetailPage({ params }: PageProps) {
+  const { id } = await params; // ✅ ここが必須
   return <PostDetailClient postId={id} />;
 }
