@@ -200,3 +200,12 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
       )}
 
       {process.env.NODE_ENV !== "production" && debug && (
+        <div className="mt-2 text-xs text-gray-400 break-words">{debug}</div>
+      )}
+
+      <div className="mt-1 text-xs text-gray-400 text-right">
+        {text.trim().length}/{MAX_LEN}
+      </div>
+    </div>
+  );
+}
