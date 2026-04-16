@@ -5,7 +5,6 @@ import { collection, doc, runTransaction, serverTimestamp } from "firebase/fires
 
 import { getDb } from "@/lib/firebase/firestore";
 import { useAnonUserId } from "@/hooks/useAnonUserId";
-import { containsNg } from "@/utils/ngFilter";
 
 const MIN_LEN = 1;
 const MAX_LEN = 100;
@@ -28,9 +27,8 @@ type JudgeResponse = {
   blockedBy?: "ng_word" | "ai" | "system" | null;
   reasonCode?: string;
   ngMatched?: string[];
-  reason?: string;
-  raw?: string;
-  detail?: string;
+  pendingId?: string;
+  logId?: string;
 };
 
 export default function CommentInput({ postId, postContent, onSubmitted }: Props) {
@@ -42,11 +40,11 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
   const [error, setError] = useState("");
   const [debug, setDebug] = useState("");
 
-  function validate(input: string): string | null {
+  // ✅ クライアント側は「最低限」だけ。表現の是非はサーバへ（AI+ルール+ログ）
+  function validateBasic(input: string): string | null {
     const t = input.trim();
     if (t.length < MIN_LEN) return "コメントを入力してください";
     if (t.length > MAX_LEN) return `コメントは${MAX_LEN}文字以内です`;
-    if (containsNg(t)) return "このSNSでは共感・賞賛コメントのみ投稿できます";
     return null;
   }
 
@@ -104,6 +102,20 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
     });
   }
 
+  function setMessageByJudge(judge: JudgeResponse) {
+    // ★ユーザーに見せる文言は「簡潔に」＋「次の行動がわかる」ようにする
+    if (judge.stage === "gray") {
+      setError("このコメントはAI判定で保留になりました。確認後に反映されます。");
+      return;
+    }
+    if (judge.blockedBy === "system") {
+      setError("ただいま判定が混み合っています。少し時間をおいて再度お試しください。");
+      return;
+    }
+    // black/ng_word or ai NG の場合
+    setError("このSNSでは共感・賞賛コメントのみ投稿できます");
+  }
+
   async function submit() {
     setError("");
     setDebug("");
@@ -112,7 +124,7 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
     if (!postId) return setError("投稿IDが取得できません。再読み込みしてください。");
     if (!anonUserId) return setError("ユーザーID準備中です。少し待ってください。");
 
-    const v = validate(text);
+    const v = validateBasic(text);
     if (v) return setError(v);
 
     const r = checkRateLimit();
@@ -123,33 +135,27 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
 
       const comment = text.trim();
 
-      // ① 判定（moderation_logs + comments_pendingに書き込まれる）
+      // ① サーバ判定（ここで moderation_logs / grayなら comments_pending が作られる）
       const judge = await judgeByServer(comment);
 
+      // devだけデバッグ表示（本番は出さない）
       if (process.env.NODE_ENV !== "production") {
         const parts: string[] = [];
         if (judge.stage) parts.push(`stage=${judge.stage}`);
         if (judge.blockedBy) parts.push(`blockedBy=${judge.blockedBy}`);
         if (judge.reasonCode) parts.push(`reasonCode=${judge.reasonCode}`);
+        if (judge.pendingId) parts.push(`pendingId=${judge.pendingId}`);
+        if (judge.logId) parts.push(`logId=${judge.logId}`);
         if (judge.ngMatched?.length) parts.push(`ng=${judge.ngMatched.join(",")}`);
-        if (judge.reason) parts.push(`reason=${judge.reason}`);
-        if (judge.raw) parts.push(`raw=${judge.raw}`);
         if (parts.length) setDebug(`debug: ${parts.join(" ")}`);
       }
 
       if (!judge.ok) {
-        // GRAY（保留）の場合は特別メッセージ
-        if (judge.stage === "gray") {
-          setError("このコメントは保留になりました。運営の確認後に反映されます。");
-        } else if (judge.blockedBy === "system") {
-          setError("ただいま判定が混み合っています。少し時間をおいて再度お試しください。");
-        } else {
-          setError("このSNSでは共感・賞賛コメントのみ投稿できます");
-        }
+        setMessageByJudge(judge);
         return;
       }
 
-      // ② WHITE（OK）の場合のみ保存
+      // ② WHITE（OK）のときだけ保存
       await saveCommentToFirestore(comment);
 
       localStorage.setItem(rateKey(postId), String(Date.now()));
@@ -194,12 +200,3 @@ export default function CommentInput({ postId, postContent, onSubmitted }: Props
       )}
 
       {process.env.NODE_ENV !== "production" && debug && (
-        <div className="mt-2 text-xs text-gray-400 break-words">{debug}</div>
-      )}
-
-      <div className="mt-1 text-xs text-gray-400 text-right">
-        {text.trim().length}/{MAX_LEN}
-      </div>
-    </div>
-  );
-}
