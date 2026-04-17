@@ -188,3 +188,19 @@ export async function POST(req: Request) {
             comment: content,
             decision: "deny",
             source: "human_gray",
+            postId,
+            pendingId: docSnap.id,
+          });
+
+          denied += 1;
+        });
+      } catch (e) {
+        errors.push({ id: docSnap.id, error: String(e) });
+      }
+    }
+
+    return NextResponse.json({ ok: true, applied, denied, errors });
+  } catch (err) {
+    return NextResponse.json({ ok: false, error: String(err) }, { status: 500 });
+  }
+}
