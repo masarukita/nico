@@ -1,100 +1,240 @@
 // components/PostCard.tsx
 "use client";
 
-import Link from "next/link";
-import type { Timestamp } from "firebase/firestore";
-
+import React, { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { Post } from "@/types/post";
-import { shortenId } from "@/utils/anonUser";
-import ReactionButtons from "@/components/ReactionButtons";
+import { timeAgo } from "@/utils/timeAgo";
 
-/**
- * PostCard の props
- * - post: 表示する投稿データ
- * - onReactionChanged: リアクション後に親側で再取得したいときに使う
- * - showDetailLink:
- *    true  -> 一覧用（本文クリックで詳細へ / 「詳細を見る→」表示）
- *    false -> 詳細用（すでに詳細なのでリンク不要＆非表示）
- */
 type Props = {
   post: Post;
-  onReactionChanged?: () => void;
-  showDetailLink?: boolean; // ★追加
 };
 
-/**
- * Firestore Timestamp を表示用文字列に変換
- */
-function formatTimestamp(ts: Timestamp | null): string {
-  if (!ts) return "";
-  const d = ts.toDate();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mi = String(d.getMinutes()).padStart(2, "0");
-  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+function shortId(id: string) {
+  const s = String(id ?? "");
+  if (!s) return "";
+  if (s.length <= 10) return s;
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
 }
 
-export default function PostCard({
-  post,
-  onReactionChanged,
-  showDetailLink = true, // ★デフォルトは一覧モード
-}: Props) {
-  const displayId = shortenId(post.userId);
-  const createdAtText = formatTimestamp(post.createdAt);
+function colorFromId(id: string) {
+  const s = String(id ?? "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return `hsl(${hue} 70% 55%)`;
+}
 
-  // 詳細URL（一覧モードだけで使う）
-  const href = `/post/${post.id}`;
+function clampText(text: string, max = 320) {
+  const t = String(text ?? "");
+  if (t.length <= max) return { head: t, tail: "" };
+  return { head: t.slice(0, max), tail: t.slice(max) };
+}
+
+// ✅ 共有（角丸ボックス＋上矢印）…あなたの確定版
+function IconShareBoxUp({
+  className = "",
+  style,
+}: {
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <svg
+      className={className}
+      style={style}
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M12 4.2v8.25"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+      <path
+        d="M9.0 6.6 12 3.6 15.0 6.6"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+      <path
+        d="M6.0 12.8v2.4A1.7 1.7 0 0 0 7.7 16.9h8.6A1.7 1.7 0 0 0 18.0 15.2v-2.4"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export default function PostCard({ post }: Props) {
+  const router = useRouter();
+
+  const userId = String(post?.userId ?? "");
+  const displayName = "Anonymous";
+  const handle = userId ? `@${shortId(userId)}` : "@anon";
+  const when = timeAgo((post as any)?.createdAt);
+
+  const avatarColor = useMemo(() => colorFromId(userId || post.id), [userId, post.id]);
+
+  const content = String(post?.content ?? "");
+  const { head, tail } = useMemo(() => clampText(content, 320), [content]);
+  const [expanded, setExpanded] = useState(false);
+
+  const replyCount = Number(post?.commentCount ?? 0);
+
+  // ✅ Like状態を1つにまとめる（+2防止の本体）
+  const [like, setLike] = useState(() => ({
+    liked: false,
+    count: Number(post?.reactionCounts?.wakaru ?? 0),
+  }));
+
+  // ✅ ハートポップ（見た目用）
+  const [heartBump, setHeartBump] = useState(false);
+
+  const goDetail = () => router.push(`/post/${post.id}`);
+
+  const onToggleLike = () => {
+    // ここで “1回のsetState” だけで更新する（StrictModeでも+2にならない）
+    setLike((prev) => {
+      const nextLiked = !prev.liked;
+      return {
+        liked: nextLiked,
+        count: prev.count + (nextLiked ? 1 : -1),
+      };
+    });
+
+    // pop animation
+    setHeartBump(false);
+    requestAnimationFrame(() => setHeartBump(true));
+  };
+
+  const onShare = async () => {
+    const url = `${window.location.origin}/post/${post.id}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "nico", text: content.slice(0, 80), url });
+      } else if (navigator.clipboard) {
+        await navigator.clipboard.writeText(url);
+        alert("リンクをコピーしました");
+      } else {
+        alert(url);
+      }
+    } catch {
+      // キャンセル等は無視
+    }
+  };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-4 mb-3">
-      {/* 上段：ユーザーと時刻 */}
-      <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold">
-          匿名ユーザー {displayId ? `(${displayId})` : ""}
-        </div>
-        {createdAtText && <div className="text-xs text-gray-400">{createdAtText}</div>}
-      </div>
+    <article className="border-b border-gray-200">
+      {/* ✅ ハートの簡単アニメ */}
+      <style jsx global>{`
+        @keyframes nico-heart-pop {
+          0% { transform: scale(1); }
+          20% { transform: scale(0.85); }
+          55% { transform: scale(1.25); }
+          75% { transform: scale(0.95); }
+          100% { transform: scale(1); }
+        }
+        .nico-heart-pop {
+          animation: nico-heart-pop 260ms cubic-bezier(.2,.8,.2,1);
+        }
+      `}</style>
 
-      {/* 本文：
-          - 一覧（showDetailLink=true）: クリックで詳細へ
-          - 詳細（showDetailLink=false）: リンク無しで表示
-      */}
-      {showDetailLink ? (
-        <Link href={href} className="block">
-          <div className="mt-2 text-base whitespace-pre-wrap leading-relaxed">
-            {post.content}
+      {/* ✅ カード本文だけクリックで詳細へ */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={goDetail}
+        className="px-3 py-3 flex gap-3 cursor-pointer"
+      >
+        <div className="shrink-0">
+          <div className="h-10 w-10 rounded-full" style={{ background: avatarColor }} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-[13px] leading-4">
+            <span className="font-semibold text-gray-900">{displayName}</span>
+            <span className="text-gray-500">{handle}</span>
+            {when && <span className="text-gray-400">· {when}</span>}
           </div>
-        </Link>
-      ) : (
-        <div className="mt-2 text-base whitespace-pre-wrap leading-relaxed">
-          {post.content}
+
+          <div className="mt-1 text-[15px] leading-5 text-gray-900 whitespace-pre-wrap break-words">
+            {expanded ? content : head}
+            {!expanded && tail && (
+              <>
+                …{" "}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpanded(true);
+                  }}
+                  className="text-gray-600 font-semibold hover:underline"
+                >
+                  もっと見る
+                </button>
+              </>
+            )}
+          </div>
         </div>
-      )}
-
-      {/* リアクション（どっちの画面でも使う） */}
-      <ReactionButtons postId={post.id} counts={post.reactionCounts} onChanged={onReactionChanged} />
-
-      {/* 下段：コメント数・詳細リンク
-          - コメント数リンクも一覧だけリンクにする（詳細ではもう不要）
-          - 「詳細を見る→」は詳細ページでは非表示にする
-      */}
-      <div className="mt-2 text-xs text-gray-500 flex items-center justify-between">
-        {showDetailLink ? (
-          <Link href={href} className="hover:underline">
-            💬 {post.commentCount}
-          </Link>
-        ) : (
-          <div>💬 {post.commentCount}</div>
-        )}
-
-        {showDetailLink && (
-          <Link href={href} className="text-gray-400 hover:underline">
-            詳細を見る →
-          </Link>
-        )}
       </div>
-    </div>
+
+      {/* ✅ アクション行：吹き出し / ハート / 共有 */}
+      <div className="px-3 pb-3">
+        <div className="ml-[52px] max-w-[320px] flex items-center justify-between">
+          {/* 吹き出し */}
+          <button
+            type="button"
+            onClick={goDetail}
+            className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
+            aria-label="Reply"
+          >
+            <span className="text-[16px] leading-none">💬</span>
+            <span className="text-xs tabular-nums">{replyCount}</span>
+          </button>
+
+          {/* ハート：赤＆ポップ＆+1/-1（+2にならない） */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onToggleLike();
+            }}
+            className={`flex items-center gap-1 leading-none ${
+              like.liked ? "text-pink-600" : "text-gray-500 hover:text-gray-900"
+            }`}
+            aria-label="Like"
+          >
+            <span
+              className={`text-[16px] leading-none ${heartBump ? "nico-heart-pop" : ""}`}
+              onAnimationEnd={() => setHeartBump(false)}
+            >
+              {like.liked ? "❤️" : "♡"}
+            </span>
+            <span className="text-xs tabular-nums">{like.count}</span>
+          </button>
+
+          {/* 共有：1px下げ（あなたの指定） */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onShare();
+            }}
+            className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
+            aria-label="Share"
+          >
+            <IconShareBoxUp className="block translate-y-[1px]" />
+          </button>
+        </div>
+      </div>
+    </article>
   );
 }

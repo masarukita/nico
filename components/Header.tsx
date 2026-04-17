@@ -1,58 +1,73 @@
 // components/Header.tsx
 "use client";
 
-import Logo from "./Logo";
 import Link from "next/link";
+import Image from "next/image";
+import { usePathname, useRouter } from "next/navigation";
 import { useAnonUserId } from "@/hooks/useAnonUserId";
 
+function shortId(id: string) {
+  const s = String(id ?? "");
+  if (!s) return "";
+  if (s.length <= 10) return s;
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
 export default function Header() {
-  // 匿名ID取得（初回アクセスで発行される）
-  const { displayId } = useAnonUserId();
+  const pathname = usePathname();
+  const router = useRouter();
+  const { anonUserId } = useAnonUserId();
 
-  // LINE共有用関数（ブラウザでのみ動く）
-  const shareToLine = () => {
-    // 現在のURLを取得
-    const url = encodeURIComponent(window.location.href);
-
-    // シェア用テキスト
-    const text = encodeURIComponent('優しい SNS「nico」使ってみて！');
-
-    // LINE共有URL（LINE公式の共有URL形式）
-    const lineUrl = `https://social-plugins.line.me/lineit/share?url=${url}&text=${text}`;
-
-    // 新しいタブで開く
-    window.open(lineUrl, "_blank");
-  };
+  const isDetail = pathname.startsWith("/post/") && !pathname.startsWith("/post/new");
 
   return (
-    <div className="flex justify-between items-center py-3 px-4 max-w-md mx-auto">
-      {/* ✅ 左側：ロゴ＋ID表示をトップページへのリンクにする */}
-      <Link href="/" className="flex flex-col cursor-pointer">
-        {/* ロゴ */}
-        <Logo />
-        {/* 匿名IDの短縮表示（動作確認用） */}
-        <span className="text-xs text-gray-400 mt-1">
-          ID: {displayId || "..."}
-        </span>
-      </Link>
+    <header className="sticky top-0 z-50 bg-white/95 backdrop-blur border-b border-gray-200">
+      <div className="max-w-md mx-auto px-3 py-2">
+        <div className="flex items-start justify-between">
+          {/* Left: 戻る or ロゴ+ID */}
+          <div className="flex items-start gap-2">
+            {isDetail ? (
+              <button
+                onClick={() => router.back()}
+                className="mt-1 p-2 -ml-2 rounded-full hover:bg-gray-100 active:bg-gray-200"
+                aria-label="Back"
+                type="button"
+              >
+                <span className="text-lg leading-none">←</span>
+              </button>
+            ) : null}
 
-      {/* 右側：ボタン群 */}
-      <div className="flex gap-2">
-        {/* LINE共有ボタン */}
-        <button
-          onClick={shareToLine}
-          className="bg-green-500 text-white px-3 py-2 rounded-full text-sm"
-        >
-          LINE
-        </button>
+            <div className="flex flex-col">
+              <Link href="/" className="inline-flex items-center">
+                <Image
+                  src="/logo_full.png"
+                  alt="nico"
+                  width={120}
+                  height={32}
+                  priority
+                />
+              </Link>
 
-        {/* 投稿画面へ */}
-        <Link href="/post/new">
-          <button className="bg-[#6FCF97] text-white px-4 py-2 rounded-full">
-            投稿
-          </button>
-        </Link>
+              {/* ID 表示（添付の仕様に合わせる） */}
+              <div className="text-[13px] leading-4 text-gray-500 mt-1">
+                ID: {anonUserId ? shortId(anonUserId) : "…"}
+              </div>
+            </div>
+          </div>
+
+          {/* Right: POST ボタン（nicoロゴに合わせた緑・存在感強め） */}
+          {!pathname.startsWith("/post/new") && (
+            <Link
+              href="/post/new"
+              className="mt-1 inline-flex items-center justify-center rounded-full px-5 py-2
+                         bg-[#6FCF97] text-white font-semibold text-[14px]
+                         hover:opacity-95 active:opacity-90 shadow-sm"
+            >
+              POST
+            </Link>
+          )}
+        </div>
       </div>
-    </div>
+    </header>
   );
 }
