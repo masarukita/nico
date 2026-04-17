@@ -1,35 +1,47 @@
 // lib/firebase/admin.ts
-import admin from "firebase-admin";
+import * as admin from "firebase-admin";
 
-function getPrivateKey(): string {
+let app: admin.app.App | null = null;
+
+function getPrivateKey() {
   const key = process.env.FIREBASE_PRIVATE_KEY;
   if (!key) return "";
-  // Vercel等で \n が文字として入るので実改行に戻す
+  // .env.local では \n が文字列として入るので実改行に戻す
   return key.replace(/\\n/g, "\n");
 }
 
-export function getAdminDb() {
-  if (!admin.apps.length) {
-    const projectId = process.env.FIREBASE_PROJECT_ID;
-    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-    const privateKey = getPrivateKey();
+export function getAdminApp() {
+  if (app) return app;
 
-    if (!projectId || !clientEmail || !privateKey) {
-      throw new Error(
-        "Firebase Admin env missing: FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY"
-      );
-    }
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = getPrivateKey();
 
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId,
-        clientEmail,
-        privateKey,
-      }),
-    });
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error(
+      "Firebase Admin env missing: FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY"
+    );
   }
 
-  return admin.firestore();
+  // 既に初期化済みならそれを使う
+  if (admin.apps.length) {
+    app = admin.app();
+    return app;
+  }
+
+  app = admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId,
+      clientEmail,
+      privateKey,
+    }),
+  });
+
+  return app;
+}
+
+export function getAdminDb() {
+  return admin.firestore(getAdminApp());
 }
 
 export { admin };
