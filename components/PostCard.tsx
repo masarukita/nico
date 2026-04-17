@@ -1,7 +1,7 @@
 // components/PostCard.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { Post } from "@/types/post";
 import { timeAgo } from "@/utils/timeAgo";
@@ -9,8 +9,10 @@ import { useAnonUserId } from "@/hooks/useAnonUserId";
 
 type Props = {
   post: Post;
+
+  // 互換（既存が渡してても型で落ちない）
   onReactionChanged?: () => void | Promise<void>;
-  showDetailLink?: boolean;
+  showDetailLink?: boolean; // 互換（UIでは使わない）
 };
 
 function shortId(id: string) {
@@ -34,6 +36,7 @@ function clampText(text: string, max = 320) {
   return { head: t.slice(0, max), tail: t.slice(max) };
 }
 
+// 共有（あなたの確定版）
 function IconShareBoxUp({ className = "" }: { className?: string }) {
   return (
     <svg className={className} width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -63,17 +66,74 @@ export default function PostCard({ post }: Props) {
 
   const replyCount = Number(post?.commentCount ?? 0);
 
+  // ✅ countはpostsから。likedは後で /api/reactions/status で復元する
   const [like, setLike] = useState(() => ({
     liked: false,
     count: Number(post?.reactionCounts?.wakaru ?? 0),
   }));
+
+  // 投稿リストが再取得された時に count を追随（表示のズレ防止）
+  useEffect(() => {
+    setLike((prev) => ({
+      ...prev,
+      count: Number(post?.reactionCounts?.wakaru ?? 0),
+    }));
+  }, [post?.reactionCounts?.wakaru]);
+
+  // ✅ 自分が押しているか（❤️）を復元：Xと同じ挙動の本体
+  const [likedLoaded, setLikedLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLiked() {
+      if (!anonUserId || !postId) return;
+      try {
+        const qs = new URLSearchParams({ postId, userId: anonUserId }).toString();
+        const res = await fetch(`/api/reactions/status?${qs}`, { method: "GET" });
+        const text = await res.text().catch(() => "");
+        const json = text ? JSON.parse(text) : null;
+        if (!cancelled && json?.ok === true) {
+          setLike((prev) => ({ ...prev, liked: Boolean(json.liked) }));
+        }
+      } catch {
+        // 失敗時は何もしない（白抜きのまま）
+      } finally {
+        if (!cancelled) setLikedLoaded(true);
+      }
+    }
+
+    setLikedLoaded(false);
+    loadLiked();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [anonUserId, postId]);
+
+  // ハートポップ
   const [heartBump, setHeartBump] = useState(false);
   const [liking, setLiking] = useState(false);
 
   const goDetail = () => router.push(`/post/${postId}`);
 
-  console.log("[like] post.id", post.id, "postId sent", postId);
+  async function safeReadJson(res: Response): Promise<any | null> {
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      try {
+        return await res.json();
+      } catch {
+        return null;
+      }
+    }
+    try {
+      const text = await res.text();
+      return { _nonJson: true, text };
+    } catch {
+      return null;
+    }
+  }
 
+  // ✅ 永続化トグル（postsのCount更新 + reactions doc 作成/削除）
   const toggleLikePersist = async () => {
     if (liking) return;
     if (!anonUserId) return;
@@ -89,27 +149,19 @@ export default function PostCard({ post }: Props) {
         body: JSON.stringify({ postId, userId: anonUserId, type: "like" }),
       });
 
-      const text = await res.text().catch(() => "");
-      // ★とにかくここで「何が返ってきたか」を必ず見える化
-      console.error("[like] toggle response:", res.status, text);
-
-      let json: any = null;
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
+      const json = await safeReadJson(res);
 
       if (!res.ok || !json || json.ok !== true) {
-        // フォールバック：見た目だけ
+        console.error("[like] toggle failed:", res.status, json);
+        // フォールバック（見た目だけ）
         setLike((prev) => {
-          const next = !prev.liked;
-          return { liked: next, count: prev.count + (next ? 1 : -1) };
+          const nextLiked = !prev.liked;
+          return { liked: nextLiked, count: prev.count + (nextLiked ? 1 : -1) };
         });
         return;
       }
 
-      // 成功：永続化された確定値を採用
+      // ✅ サーバ確定値で更新：countもlikedも整合する
       setLike({ liked: Boolean(json.liked), count: Number(json.count) });
     } finally {
       setLiking(false);
@@ -140,9 +192,12 @@ export default function PostCard({ post }: Props) {
           75% { transform: scale(0.95); }
           100% { transform: scale(1); }
         }
-        .nico-heart-pop { animation: nico-heart-pop 260ms cubic-bezier(.2,.8,.2,1); }
+        .nico-heart-pop {
+          animation: nico-heart-pop 260ms cubic-bezier(.2,.8,.2,1);
+        }
       `}</style>
 
+      {/* 本文クリックで詳細 */}
       <div role="button" tabIndex={0} onClick={goDetail} className="px-3 py-3 flex gap-3 cursor-pointer">
         <div className="shrink-0">
           <div className="h-10 w-10 rounded-full" style={{ background: avatarColor }} />
@@ -162,7 +217,10 @@ export default function PostCard({ post }: Props) {
                 …{" "}
                 <button
                   type="button"
-                  onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExpanded(true);
+                  }}
                   className="text-gray-600 font-semibold hover:underline"
                 >
                   もっと見る
@@ -173,22 +231,37 @@ export default function PostCard({ post }: Props) {
         </div>
       </div>
 
+      {/* アクション行 */}
       <div className="px-3 pb-3">
         <div className="ml-[52px] max-w-[320px] flex items-center justify-between">
+          {/* 💬 */}
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); goDetail(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              goDetail();
+            }}
             className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
+            aria-label="Reply"
           >
             <span className="text-[16px] leading-none">💬</span>
             <span className="text-xs tabular-nums">{replyCount}</span>
           </button>
 
+          {/* ❤️ */}
           <button
             type="button"
-            disabled={liking}
-            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleLikePersist(); }}
-            className={`flex items-center gap-1 leading-none ${like.liked ? "text-pink-600" : "text-gray-500 hover:text-gray-900"} ${liking ? "opacity-60" : ""}`}
+            disabled={liking || !anonUserId}
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              toggleLikePersist();
+            }}
+            className={`flex items-center gap-1 leading-none ${
+              like.liked ? "text-pink-600" : "text-gray-500 hover:text-gray-900"
+            } ${(liking || !anonUserId) ? "opacity-60" : ""}`}
+            aria-label="Like"
+            title={!likedLoaded ? "loading..." : undefined}
           >
             <span className={`text-[16px] leading-none ${heartBump ? "nico-heart-pop" : ""}`}>
               {like.liked ? "❤️" : "♡"}
@@ -196,10 +269,15 @@ export default function PostCard({ post }: Props) {
             <span className="text-xs tabular-nums">{like.count}</span>
           </button>
 
+          {/* 共有（1px下げ） */}
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); onShare(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onShare();
+            }}
             className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
+            aria-label="Share"
           >
             <IconShareBoxUp className="block translate-y-[1px]" />
           </button>
