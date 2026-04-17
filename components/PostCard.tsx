@@ -8,7 +8,8 @@ import { timeAgo } from "@/utils/timeAgo";
 
 type Props = {
   post: Post;
-  onReactionChanged?: () => void; // ★復活：親側が渡しててもビルド落ちない
+  onReactionChanged?: () => void;     // 互換：app/page.tsx 側が渡していてもOK
+  showDetailLink?: boolean;           // 互換：PostDetailClient.tsx 側が渡していてもOK
 };
 
 function shortId(id: string) {
@@ -32,7 +33,7 @@ function clampText(text: string, max = 320) {
   return { head: t.slice(0, max), tail: t.slice(max) };
 }
 
-// 共有アイコン（あなたの確定版）
+// ✅ 共有アイコン（あなたの確定版）
 function IconShareBoxUp({
   className = "",
   style,
@@ -84,12 +85,13 @@ export default function PostCard({ post, onReactionChanged }: Props) {
 
   const replyCount = Number(post?.commentCount ?? 0);
 
-  // Like状態を1つにまとめる（+2問題対策）
+  // ✅ Like状態を1つにまとめる（1クリック+2問題の根絶）
   const [like, setLike] = useState(() => ({
     liked: false,
     count: Number(post?.reactionCounts?.wakaru ?? 0),
   }));
 
+  // ✅ ハートポップ
   const [heartBump, setHeartBump] = useState(false);
 
   const goDetail = () => router.push(`/post/${post.id}`);
@@ -97,17 +99,13 @@ export default function PostCard({ post, onReactionChanged }: Props) {
   const onToggleLike = () => {
     setLike((prev) => {
       const nextLiked = !prev.liked;
-      return {
-        liked: nextLiked,
-        count: prev.count + (nextLiked ? 1 : -1),
-      };
+      return { liked: nextLiked, count: prev.count + (nextLiked ? 1 : -1) };
     });
 
     setHeartBump(false);
     requestAnimationFrame(() => setHeartBump(true));
 
-    // ★必要なら親に通知（全体再取得など）
-    // いまはUI最優先でもOK。将来DB反映を入れるならここで呼ぶ/呼ばないは選べる。
+    // 互換：親で再取得したい場合だけ使う（必須ではない）
     onReactionChanged?.();
   };
 
@@ -123,12 +121,13 @@ export default function PostCard({ post, onReactionChanged }: Props) {
         alert(url);
       }
     } catch {
-      // cancel等は無視
+      // キャンセル等は無視
     }
   };
 
   return (
     <article className="border-b border-gray-200">
+      {/* ✅ ハート簡単アニメ */}
       <style jsx global>{`
         @keyframes nico-heart-pop {
           0% { transform: scale(1); }
@@ -142,7 +141,7 @@ export default function PostCard({ post, onReactionChanged }: Props) {
         }
       `}</style>
 
-      {/* 本文クリックで詳細へ */}
+      {/* 本文クリックで詳細 */}
       <div
         role="button"
         tabIndex={0}
@@ -224,6 +223,7 @@ export default function PostCard({ post, onReactionChanged }: Props) {
             className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
             aria-label="Share"
           >
+            {/* 共有アイコンを1px下げ */}
             <IconShareBoxUp className="block translate-y-[1px]" />
           </button>
         </div>
