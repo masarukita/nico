@@ -8,6 +8,7 @@ import { timeAgo } from "@/utils/timeAgo";
 
 type Props = {
   post: Post;
+  onReactionChanged?: () => void; // ★復活：親側が渡しててもビルド落ちない
 };
 
 function shortId(id: string) {
@@ -31,7 +32,7 @@ function clampText(text: string, max = 320) {
   return { head: t.slice(0, max), tail: t.slice(max) };
 }
 
-// ✅ 共有（角丸ボックス＋上矢印）…あなたの確定版
+// 共有アイコン（あなたの確定版）
 function IconShareBoxUp({
   className = "",
   style,
@@ -49,12 +50,7 @@ function IconShareBoxUp({
       fill="none"
       aria-hidden="true"
     >
-      <path
-        d="M12 4.2v8.25"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
+      <path d="M12 4.2v8.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       <path
         d="M9.0 6.6 12 3.6 15.0 6.6"
         stroke="currentColor"
@@ -72,7 +68,7 @@ function IconShareBoxUp({
   );
 }
 
-export default function PostCard({ post }: Props) {
+export default function PostCard({ post, onReactionChanged }: Props) {
   const router = useRouter();
 
   const userId = String(post?.userId ?? "");
@@ -88,19 +84,17 @@ export default function PostCard({ post }: Props) {
 
   const replyCount = Number(post?.commentCount ?? 0);
 
-  // ✅ Like状態を1つにまとめる（+2防止の本体）
+  // Like状態を1つにまとめる（+2問題対策）
   const [like, setLike] = useState(() => ({
     liked: false,
     count: Number(post?.reactionCounts?.wakaru ?? 0),
   }));
 
-  // ✅ ハートポップ（見た目用）
   const [heartBump, setHeartBump] = useState(false);
 
   const goDetail = () => router.push(`/post/${post.id}`);
 
   const onToggleLike = () => {
-    // ここで “1回のsetState” だけで更新する（StrictModeでも+2にならない）
     setLike((prev) => {
       const nextLiked = !prev.liked;
       return {
@@ -109,9 +103,12 @@ export default function PostCard({ post }: Props) {
       };
     });
 
-    // pop animation
     setHeartBump(false);
     requestAnimationFrame(() => setHeartBump(true));
+
+    // ★必要なら親に通知（全体再取得など）
+    // いまはUI最優先でもOK。将来DB反映を入れるならここで呼ぶ/呼ばないは選べる。
+    onReactionChanged?.();
   };
 
   const onShare = async () => {
@@ -126,13 +123,12 @@ export default function PostCard({ post }: Props) {
         alert(url);
       }
     } catch {
-      // キャンセル等は無視
+      // cancel等は無視
     }
   };
 
   return (
     <article className="border-b border-gray-200">
-      {/* ✅ ハートの簡単アニメ */}
       <style jsx global>{`
         @keyframes nico-heart-pop {
           0% { transform: scale(1); }
@@ -146,7 +142,7 @@ export default function PostCard({ post }: Props) {
         }
       `}</style>
 
-      {/* ✅ カード本文だけクリックで詳細へ */}
+      {/* 本文クリックで詳細へ */}
       <div
         role="button"
         tabIndex={0}
@@ -185,10 +181,9 @@ export default function PostCard({ post }: Props) {
         </div>
       </div>
 
-      {/* ✅ アクション行：吹き出し / ハート / 共有 */}
+      {/* アクション行：💬 / ♡ / 共有 */}
       <div className="px-3 pb-3">
         <div className="ml-[52px] max-w-[320px] flex items-center justify-between">
-          {/* 吹き出し */}
           <button
             type="button"
             onClick={goDetail}
@@ -199,7 +194,6 @@ export default function PostCard({ post }: Props) {
             <span className="text-xs tabular-nums">{replyCount}</span>
           </button>
 
-          {/* ハート：赤＆ポップ＆+1/-1（+2にならない） */}
           <button
             type="button"
             onClick={(e) => {
@@ -221,7 +215,6 @@ export default function PostCard({ post }: Props) {
             <span className="text-xs tabular-nums">{like.count}</span>
           </button>
 
-          {/* 共有：1px下げ（あなたの指定） */}
           <button
             type="button"
             onClick={(e) => {
