@@ -8,8 +8,8 @@ import { timeAgo } from "@/utils/timeAgo";
 
 type Props = {
   post: Post;
-  onReactionChanged?: () => void;     // 互換：app/page.tsx 側が渡していてもOK
-  showDetailLink?: boolean;           // 互換：PostDetailClient.tsx 側が渡していてもOK
+  onReactionChanged?: () => void;   // 互換のため残す（♡では呼ばない）
+  showDetailLink?: boolean;         // 互換のため残す（使わない）
 };
 
 function shortId(id: string) {
@@ -33,7 +33,6 @@ function clampText(text: string, max = 320) {
   return { head: t.slice(0, max), tail: t.slice(max) };
 }
 
-// ✅ 共有アイコン（あなたの確定版）
 function IconShareBoxUp({
   className = "",
   style,
@@ -85,28 +84,32 @@ export default function PostCard({ post, onReactionChanged }: Props) {
 
   const replyCount = Number(post?.commentCount ?? 0);
 
-  // ✅ Like状態を1つにまとめる（1クリック+2問題の根絶）
+  // ✅ Like状態は1つにまとめる（StrictModeでも安全）
   const [like, setLike] = useState(() => ({
     liked: false,
     count: Number(post?.reactionCounts?.wakaru ?? 0),
   }));
 
-  // ✅ ハートポップ
   const [heartBump, setHeartBump] = useState(false);
 
   const goDetail = () => router.push(`/post/${post.id}`);
 
-  const onToggleLike = () => {
+  const toggleLikeLocalOnly = () => {
+    // ✅ 必ず動作確認できるログ
+    console.log("[LIKE] clicked", post.id);
+
+    // ✅ ここは「UIが確実に変わる」ことを優先
     setLike((prev) => {
       const nextLiked = !prev.liked;
       return { liked: nextLiked, count: prev.count + (nextLiked ? 1 : -1) };
     });
 
+    // pop animation
     setHeartBump(false);
     requestAnimationFrame(() => setHeartBump(true));
 
-    // 互換：親で再取得したい場合だけ使う（必須ではない）
-    onReactionChanged?.();
+    // ★ ここでは親再取得を呼ばない（呼ぶと即リセットされるケースがある）
+    // onReactionChanged?.();
   };
 
   const onShare = async () => {
@@ -127,7 +130,6 @@ export default function PostCard({ post, onReactionChanged }: Props) {
 
   return (
     <article className="border-b border-gray-200">
-      {/* ✅ ハート簡単アニメ */}
       <style jsx global>{`
         @keyframes nico-heart-pop {
           0% { transform: scale(1); }
@@ -141,7 +143,7 @@ export default function PostCard({ post, onReactionChanged }: Props) {
         }
       `}</style>
 
-      {/* 本文クリックで詳細 */}
+      {/* 本文クリックで詳細（アクションとは完全分離） */}
       <div
         role="button"
         tabIndex={0}
@@ -180,12 +182,15 @@ export default function PostCard({ post, onReactionChanged }: Props) {
         </div>
       </div>
 
-      {/* アクション行：💬 / ♡ / 共有 */}
+      {/* アクション行 */}
       <div className="px-3 pb-3">
         <div className="ml-[52px] max-w-[320px] flex items-center justify-between">
           <button
             type="button"
-            onClick={goDetail}
+            onClick={(e) => {
+              e.stopPropagation();
+              goDetail();
+            }}
             className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
             aria-label="Reply"
           >
@@ -193,12 +198,13 @@ export default function PostCard({ post, onReactionChanged }: Props) {
             <span className="text-xs tabular-nums">{replyCount}</span>
           </button>
 
+          {/* ✅ Like：ここで絶対に遷移させない＆必ずstateが変わる */}
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               e.preventDefault();
-              onToggleLike();
+              toggleLikeLocalOnly();
             }}
             className={`flex items-center gap-1 leading-none ${
               like.liked ? "text-pink-600" : "text-gray-500 hover:text-gray-900"
@@ -223,7 +229,6 @@ export default function PostCard({ post, onReactionChanged }: Props) {
             className="flex items-center gap-1 text-gray-500 hover:text-gray-900 active:text-gray-900 leading-none"
             aria-label="Share"
           >
-            {/* 共有アイコンを1px下げ */}
             <IconShareBoxUp className="block translate-y-[1px]" />
           </button>
         </div>
