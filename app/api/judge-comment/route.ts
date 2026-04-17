@@ -4,35 +4,40 @@ import { getAdminDb, admin } from "@/lib/firebase/admin";
 import { checkNgWords } from "@/lib/moderation/ngWords";
 
 type Topic = "HEALTH" | "WORK" | "MEETING" | "RELATIONSHIP" | "STUDY" | "ANY";
-type AiRaw = "YES" | "NO" | "ERROR";
+type Stage = "white" | "gray" | "black";
 
-type AiJudgeResult = {
-  raw: "YES" | "NO";
-  reason: string;
-  model: string;
-  latencyMs: number;
+type AiOutput = {
+  stage: Stage;
+  reasonCode: string;
+  note?: string;
 };
 
-// -------------------------
-// utils
-// -------------------------
 function excerpt(text: string, max = 80) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
   return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
 function sanitizeErrorMessage(msg: string) {
-  // 万が一、キー断片が混じってもログに残さない
   return String(msg ?? "").replace(/sk-[A-Za-z0-9_-]+/g, "sk-***");
 }
 
-// topic推定（seedTopicがなくても本文から分類）
+function normalizeKey(text: string) {
+  return String(text ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^\p{L}\p{N}]/gu, "");
+}
+
 function inferTopic(text: string): Topic {
   const t = (text ?? "").toLowerCase();
   const has = (...words: string[]) => words.some((w) => t.includes(w));
 
-  if (has("おなか", "痛い", "体調", "熱", "頭痛", "しんどい", "眠い", "病院")) return "HEALTH";
+  // ★改善（3）：英語/海外/外国などはMEETINGとは限らないのでANY/RELATIONSHIPへ寄せ過ぎない
+  // ただし「mtg/会議」があるならMEETINGを優先。
   if (has("mtg", "会議", "打ち合わせ", "定例", "レビュー", "議事録")) return "MEETING";
+
+  if (has("おなか", "痛い", "体調", "熱", "頭痛", "しんどい", "眠い", "病院")) return "HEALTH";
   if (has("仕事", "業務", "顧客", "対応", "依頼", "締切", "提出", "残業")) return "WORK";
   if (has("旦那", "夫", "妻", "彼氏", "彼女", "パートナー", "家族")) return "RELATIONSHIP";
   if (has("課題", "レポート", "ゼミ", "研究", "テスト", "勉強")) return "STUDY";
@@ -40,7 +45,12 @@ function inferTopic(text: string): Topic {
   return "ANY";
 }
 
-// moderation_logs 書き込み（必ず残す）
+function makeFingerprint(topic: Topic, postExcerpt: string, comment: string) {
+  const a = normalizeKey(postExcerpt);
+  const b = normalizeKey(comment);
+  return `v1|${topic}|${a}|${b}`;
+}
+
 async function writeModerationLog(db: FirebaseFirestore.Firestore, payload: any) {
   const ref = await db.collection("moderation_logs").add({
     ...payload,
@@ -49,57 +59,40 @@ async function writeModerationLog(db: FirebaseFirestore.Firestore, payload: any)
   return ref.id;
 }
 
-// examples取得（topic別→足りなければANYで補完）
-async function fetchExamples(db: FirebaseFirestore.Firestore, topic: Topic) {
-  // NOTE:
-  // ここは where(topic==) + where(decision==) + orderBy(decidedAt) を使うため、
-  // Firestoreの複合インデックスが必要になる可能性があります。
-  // 不足していた場合でも、このrouteはcatchで必ずmessageを返します（Responseが空にならない）。
-  const col = db.collection("moderation_examples");
-
-  const qAllowTopic = col
-    .where("topic", "==", topic)
-    .where("decision", "==", "allow")
-    .orderBy("decidedAt", "desc")
-    .limit(2);
-
-  const qDenyTopic = col
-    .where("topic", "==", topic)
-    .where("decision", "==", "deny")
-    .orderBy("decidedAt", "desc")
-    .limit(2);
-
-  const qAllowAny = col
-    .where("topic", "==", "ANY")
-    .where("decision", "==", "allow")
-    .orderBy("decidedAt", "desc")
-    .limit(2);
-
-  const qDenyAny = col
-    .where("topic", "==", "ANY")
-    .where("decision", "==", "deny")
-    .orderBy("decidedAt", "desc")
-    .limit(2);
-
-  const [allowTopicSnap, denyTopicSnap, allowAnySnap, denyAnySnap] = await Promise.all([
-    qAllowTopic.get(),
-    qDenyTopic.get(),
-    qAllowAny.get(),
-    qDenyAny.get(),
-  ]);
-
-  const docs = [
-    ...allowTopicSnap.docs,
-    ...denyTopicSnap.docs,
-    ...allowAnySnap.docs,
-    ...denyAnySnap.docs,
-  ].slice(0, 4);
-
-  return docs.map((d) => d.data());
+// exact match（fingerprint一致）を優先
+async function findExactDecision(db: FirebaseFirestore.Firestore, fp: string) {
+  const docSnap = await db.collection("moderation_examples").doc(fp).get();
+  if (!docSnap.exists) return null;
+  const e = docSnap.data() as any;
+  const decision = String(e.decision ?? "");
+  if (decision === "allow" || decision === "deny") return decision as "allow" | "deny";
+  return null;
 }
 
-// AI判定（examplesをfew-shotとして混ぜる）
-async function judgeByAI(post: string, comment: string, examples: any[]): Promise<AiJudgeResult> {
+// examples取得（インデックス地獄を避ける：最新50件だけ取ってメモリでフィルタ）
+async function fetchFewShotExamples(db: FirebaseFirestore.Firestore, topic: Topic) {
+  const snap = await db.collection("moderation_examples")
+    .orderBy("decidedAt", "desc")
+    .limit(50)
+    .get();
+
+  const rows = snap.docs.map(d => d.data() as any);
+
+  const pick = (t: Topic, decision: "allow" | "deny", n: number) =>
+    rows.filter(r => r.topic === t && r.decision === decision).slice(0, n);
+
+  const examples = [
+    ...pick(topic, "allow", 2),
+    ...pick(topic, "deny", 2),
+    ...pick("ANY", "allow", 1),
+    ...pick("ANY", "deny", 1),
+  ].slice(0, 4);
+
+  return examples;
+}
+
+// AI判定：stage/reasonCode を JSONで返させる（1の改善：理由コード）
+async function judgeByAI(post: string, comment: string, examples: any[]): Promise<{ out: AiOutput; model: string; latencyMs: number }> {
   const started = Date.now();
 
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -118,12 +111,25 @@ async function judgeByAI(post: string, comment: string, examples: any[]): Promis
           .join("\n\n")
       : "(no examples yet)";
 
-  const system = `You moderate replies in a support-only social app.
-Rules:
-- This is a positive-only SNS: allow only empathy/support/praise that matches the post context.
-- If uncertain, prefer NO (will go to human review).
-Follow HUMAN_DECISION examples when similar.
-Output ONLY "YES" or "NO".`;
+  const system = `You are a moderation engine for a positive-only SNS.
+Return JSON only with keys: stage, reasonCode, note.
+- stage must be one of: "white", "gray", "black"
+- "white": empathy/support/praise that matches the post context.
+- "gray": uncertain or borderline; send to human review.
+- "black": clear policy violation (harassment, hate, personal attack, explicit slur, etc.)
+Prefer "gray" over "white" when uncertain.
+
+reasonCode examples (choose one that fits):
+- OK_SUPPORT
+- OK_EMPATHY
+- OK_PRAISE
+- GRAY_UNCERTAIN
+- GRAY_OFFTOPIC
+- GRAY_ASSUMPTION
+- BLACK_HARASSMENT
+- BLACK_HATE
+- BLACK_ATTACK
+`;
 
   const user = `HUMAN_GUIDANCE_EXAMPLES:
 ${exampleText}
@@ -146,6 +152,7 @@ COMMENT: ${comment}
         { role: "system", content: system },
         { role: "user", content: user },
       ],
+      response_format: { type: "json_object" } // JSON強制（対応モデルなら効く）
     }),
   });
 
@@ -155,18 +162,26 @@ COMMENT: ${comment}
   }
 
   const json = await res.json();
-  const content = String(json?.choices?.[0]?.message?.content ?? "").trim().toUpperCase();
+  const content = String(json?.choices?.[0]?.message?.content ?? "").trim();
 
-  const raw: "YES" | "NO" = content.includes("YES") ? "YES" : "NO";
-  const reason = raw === "YES" ? "yes" : "no";
+  let out: AiOutput | null = null;
+  try {
+    out = JSON.parse(content);
+  } catch {
+    out = null;
+  }
+
+  // fallback（壊れてたらgray）
+  const stage: Stage =
+    out?.stage === "white" || out?.stage === "black" || out?.stage === "gray" ? out.stage : "gray";
+
+  const reasonCode = String(out?.reasonCode ?? "GRAY_UNCERTAIN");
+  const note = out?.note ? String(out.note) : undefined;
+
   const latencyMs = Date.now() - started;
-
-  return { raw, reason, model, latencyMs };
+  return { out: { stage, reasonCode, note }, model, latencyMs };
 }
 
-// -------------------------
-// Route Handler
-// -------------------------
 export async function POST(req: Request) {
   const started = Date.now();
   const db = getAdminDb();
@@ -195,9 +210,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // -------------------------
-    // BLACK: 強NGワード（AIに回さない）
-    // -------------------------
+    // BLACK: 強NGワード
     const ng = checkNgWords(comment);
     if (ng) {
       const logId = await writeModerationLog(db, {
@@ -229,35 +242,96 @@ export async function POST(req: Request) {
       });
     }
 
-    // -------------------------
-    // WHITE/GRAY: AI（examples参照）
-    // -------------------------
+    const postEx = excerpt(postContent, 80);
     const topic = inferTopic(postContent);
+    const fp = makeFingerprint(topic, postEx, comment);
 
-    // examples取得（ここでインデックス不足などが起きたらcatchへ）
-    const examples = await fetchExamples(db, topic);
-
-    const ai = await judgeByAI(postContent, comment, examples);
-
-    // WHITE
-    if (ai.raw === "YES") {
+    // ✅ 2) exact-match優先（HUMAN決定をAIより上）
+    const exact = await findExactDecision(db, fp);
+    if (exact === "allow") {
       const logId = await writeModerationLog(db, {
         env: process.env.VERCEL_ENV || "local",
         postId,
-        postExcerpt: excerpt(postContent),
+        postExcerpt: postEx,
         commentExcerpt: excerpt(comment),
         userId,
 
         accepted: true,
         stage: "white",
         blockedBy: null,
-        reasonCode: "AI:YES",
-        ngMatched: [],
-
+        reasonCode: "HUMAN:EXACT_ALLOW",
         topic,
-        aiRaw: ai.raw,
+        fingerprint: fp,
+
+        aiRaw: null,
+        aiModel: null,
+        aiReason: null,
+        latencyMs: Date.now() - started,
+      });
+
+      return NextResponse.json({
+        ok: true,
+        stage: "white",
+        blockedBy: null,
+        reasonCode: "HUMAN:EXACT_ALLOW",
+        logId,
+      });
+    }
+    if (exact === "deny") {
+      const logId = await writeModerationLog(db, {
+        env: process.env.VERCEL_ENV || "local",
+        postId,
+        postExcerpt: postEx,
+        commentExcerpt: excerpt(comment),
+        userId,
+
+        accepted: false,
+        stage: "black",
+        blockedBy: "ai",
+        reasonCode: "HUMAN:EXACT_DENY",
+        topic,
+        fingerprint: fp,
+
+        aiRaw: null,
+        aiModel: null,
+        aiReason: null,
+        latencyMs: Date.now() - started,
+      });
+
+      return NextResponse.json({
+        ok: false,
+        stage: "black",
+        blockedBy: "ai",
+        reasonCode: "HUMAN:EXACT_DENY",
+        logId,
+      });
+    }
+
+    // ✅ 1,3) examples参照（最新50件からtopic/decisionでフィルタ）
+    const examples = await fetchFewShotExamples(db, topic);
+
+    // AI判定（stage/reasonCode付き）
+    const ai = await judgeByAI(postContent, comment, examples);
+
+    // white → そのままOK
+    if (ai.out.stage === "white") {
+      const logId = await writeModerationLog(db, {
+        env: process.env.VERCEL_ENV || "local",
+        postId,
+        postExcerpt: postEx,
+        commentExcerpt: excerpt(comment),
+        userId,
+
+        accepted: true,
+        stage: "white",
+        blockedBy: null,
+        reasonCode: `AI:${ai.out.reasonCode}`,
+        topic,
+        fingerprint: fp,
+
+        aiRaw: "YES",
         aiModel: ai.model,
-        aiReason: ai.reason,
+        aiReason: ai.out.reasonCode,
         latencyMs: ai.latencyMs,
       });
 
@@ -265,30 +339,33 @@ export async function POST(req: Request) {
         ok: true,
         stage: "white",
         blockedBy: null,
-        reasonCode: "AI:YES",
+        reasonCode: `AI:${ai.out.reasonCode}`,
         logId,
       });
     }
 
-    // GRAY（AI: NO）→ pendingへ
-    const reasonCode = `AI:NO_${ai.reason.toUpperCase()}`;
+    // black/gray → pendingへ（blackも人間救済したいならここをgrayに寄せてもOK）
+    const stage: Stage = ai.out.stage === "black" ? "gray" : "gray"; // 運用簡単化：AI black もいったん gray に流す
+    const blockedBy = "ai";
+    const reasonCode = `AI:${ai.out.reasonCode}`;
+
     const logId = await writeModerationLog(db, {
       env: process.env.VERCEL_ENV || "local",
       postId,
-      postExcerpt: excerpt(postContent),
+      postExcerpt: postEx,
       commentExcerpt: excerpt(comment),
       userId,
 
       accepted: false,
-      stage: "gray",
-      blockedBy: "ai",
+      stage,
+      blockedBy,
       reasonCode,
-      ngMatched: [],
-
       topic,
-      aiRaw: ai.raw,
+      fingerprint: fp,
+
+      aiRaw: "NO",
       aiModel: ai.model,
-      aiReason: ai.reason,
+      aiReason: ai.out.reasonCode,
       latencyMs: ai.latencyMs,
     });
 
@@ -296,12 +373,14 @@ export async function POST(req: Request) {
       postId,
       userId,
       content: comment,
-      postExcerpt: excerpt(postContent),
+      postExcerpt: postEx,
       commentExcerpt: excerpt(comment),
 
       topic,
-      aiRaw: ai.raw as AiRaw,
-      aiReason: ai.reason,
+      fingerprint: fp,
+
+      aiRaw: "NO",
+      aiReason: ai.out.reasonCode,
       aiModel: ai.model,
 
       status: "pending",
@@ -317,18 +396,16 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: false,
       stage: "gray",
-      blockedBy: "ai",
+      blockedBy: blockedBy,
       reasonCode,
       pendingId: pendingRef.id,
       logId,
     });
   } catch (e: any) {
-    // ★ここが重要：Responseが空にならないよう必ずJSONを返す
     const msg = sanitizeErrorMessage(e?.message || String(e));
     console.error("[judge-comment] 500 error:", e);
 
-    // systemエラーも gray として pending に落として、人間が救済できるようにしてもOK
-    // ただしここではまず原因特定優先で、bodyに message を返す
+    // Responseが空にならないよう必ず返す
     return NextResponse.json(
       {
         ok: false,
